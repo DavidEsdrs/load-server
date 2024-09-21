@@ -1,10 +1,12 @@
 package main
 
 import (
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,16 +19,26 @@ type Backend struct {
 	activesConnections uint64
 	maxConn            uint64
 
+	RateLimiter func(http.HandlerFunc) http.HandlerFunc
+
 	accResponseTime  uint64
 	totalConn        uint64
 	meanResponseTime uint64
+
+	logFile *os.File
 }
 
 func NewBackend(target *url.URL) *Backend {
+	f, err := os.OpenFile(target.Host+".log", os.O_CREATE|os.O_RDONLY, 0640)
+	if err != nil {
+		log.Fatalf("unable to create log file for backend path \"%v\"", target.Host)
+	}
+
 	return &Backend{
 		target:             target,
 		activesConnections: 0,
 		maxConn:            1e3,
+		logFile:            f,
 	}
 }
 
@@ -46,23 +58,52 @@ func (b *Backend) IncrementTotal() {
 	atomic.AddUint64(&b.totalConn, 1)
 }
 
+func (b *Backend) Cleanup() error {
+	return b.logFile.Close()
+}
+
 type ProxyHandler struct {
-	backends           []*Backend
-	currBackend        uint64
-	maxBackend         int
-	activesConnections uint64
+	backends    []*Backend
+	currBackend uint64
+	maxBackend  int
+}
+
+func (ph *ProxyHandler) Cleanup() error {
+	for _, b := range ph.backends {
+		if err := b.Cleanup(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // create a ProxyHandler that can redirect requests to given backends
-func NewProxyHandler(backends []string) *ProxyHandler {
+func NewProxyHandler(backends []BackendConfig) *ProxyHandler {
 	var backendURLs []*Backend
 
 	for _, b := range backends {
-		url, err := url.Parse(b)
+		url, err := url.Parse(b.Path)
 		if err != nil {
-			panic("Invalid backend URL: " + b)
+			panic("Invalid backend path")
 		}
 		backend := NewBackend(url)
+
+		if tb, ok := b.RateLimit.(*TokenBucket); ok {
+			backend.RateLimiter = TokenBucketLimiting(
+				time.Duration(tb.GenerationTime),
+				tb.MaxToken,
+			)
+		} else if lb, ok := b.RateLimit.(*LeakyBucket); ok {
+			backend.RateLimiter = LeakyBucketLimiting(
+				time.Duration(lb.LeakyRateMs),
+				lb.MaxCapacity,
+			)
+		} else {
+			backend.RateLimiter = func(hf http.HandlerFunc) http.HandlerFunc {
+				return hf
+			}
+		}
+
 		backendURLs = append(backendURLs, backend)
 	}
 
@@ -76,18 +117,18 @@ func NewProxyHandler(backends []string) *ProxyHandler {
 func (ph *ProxyHandler) RoundRobin() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		next := atomic.AddUint64(&ph.currBackend, 1)
-		targetBackend := ph.backends[next%uint64(ph.maxBackend)].target
-		proxy := httputil.NewSingleHostReverseProxy(targetBackend)
-		proxy.ServeHTTP(w, r)
+		targetBackend := ph.backends[next%uint64(ph.maxBackend)]
+		proxy := httputil.NewSingleHostReverseProxy(targetBackend.target)
+		targetBackend.RateLimiter(proxy.ServeHTTP)(w, r)
 	}
 }
 
 func (ph *ProxyHandler) Random() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		next := rand.Intn(ph.maxBackend)
-		targetBackend := ph.backends[next].target
-		proxy := httputil.NewSingleHostReverseProxy(targetBackend)
-		proxy.ServeHTTP(w, r)
+		targetBackend := ph.backends[next]
+		proxy := httputil.NewSingleHostReverseProxy(targetBackend.target)
+		targetBackend.RateLimiter(proxy.ServeHTTP)(w, r)
 	}
 }
 
@@ -125,7 +166,7 @@ func (ph *ProxyHandler) LeastConnection() http.HandlerFunc {
 			return nil
 		}
 
-		proxy.ServeHTTP(w, r)
+		targetBackend.RateLimiter(proxy.ServeHTTP)(w, r)
 	}
 }
 
@@ -140,9 +181,7 @@ func (ph *ProxyHandler) LeastResponseTime() http.HandlerFunc {
 		}
 
 		requestId := GenerateRequestID()
-
 		proxy := httputil.NewSingleHostReverseProxy(targetBackend.target)
-
 		originalDirector := proxy.Director
 
 		var (
@@ -173,7 +212,7 @@ func (ph *ProxyHandler) LeastResponseTime() http.HandlerFunc {
 			return nil
 		}
 
-		proxy.ServeHTTP(w, r)
+		targetBackend.RateLimiter(proxy.ServeHTTP)(w, r)
 	}
 }
 
@@ -185,7 +224,7 @@ func (ph *ProxyHandler) WithRateLimiting(
 }
 
 func GenerateRequestID() string {
-	return uuid.New().String() // Gera um UUID único para cada requisição
+	return uuid.New().String()
 }
 
 func calculateMeanTime(backend *Backend, duration uint64) {

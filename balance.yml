@@ -1,0 +1,32 @@
+port: ":3000"
+
+balancing:
+  type: random
+
+backends:
+  - name: main
+    path: http://localhost:3001
+    rate_limit:
+      type: token_bucket
+      generation_time_ms: 1000
+      max_token: 1000
+  - name: secondary
+    path: http://localhost:3002
+    rate_limit:
+      type: leaky_bucket
+      leaky_rate_ms: 1000
+      max_capacity: 1000
+  - name: tertiary
+    path: http://localhost:3003
+    rate_limit:
+      type: token_bucket
+      generation_time_ms: 1000
+      max_token: 1000
+
+routing_rules:
+  - path: "/app"
+    backend: main
+  - path: "v2."
+    backend: secondary
+  - path: "api."
+    backend: tertiary

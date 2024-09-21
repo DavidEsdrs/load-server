@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
+	"log"
 	"net/http"
-	"os"
-	"time"
 )
+
+var config Config
 
 func testing() {
 	mux := http.NewServeMux()
@@ -30,31 +30,12 @@ func testing() {
 func main() {
 	testing()
 
-	backends := parseBackends("backends")
+	parseConfig("balance")
 
-	proxyHandler := NewProxyHandler(backends)
+	proxyHandler := NewProxyHandler(config.BackendConfigs)
+	defer proxyHandler.Cleanup()
 
-	http.ListenAndServe(
-		":3000",
-		proxyHandler.WithRateLimiting(
-			LeakyBucket(time.Second*1, 10),
-			proxyHandler.RoundRobin(),
-		),
-	)
-}
+	balancingAlgorithm := getBalancingAlgorithm(proxyHandler)
 
-func parseBackends(filename string) []string {
-	var backends []string
-
-	f, err := os.OpenFile(filename, os.O_RDONLY, 0666)
-	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		backends = append(backends, scanner.Text())
-	}
-
-	return backends
+	log.Fatal(http.ListenAndServe(config.Port, balancingAlgorithm()))
 }
