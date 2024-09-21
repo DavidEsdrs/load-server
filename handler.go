@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -14,6 +16,10 @@ type Backend struct {
 	target             *url.URL
 	activesConnections uint64
 	maxConn            uint64
+
+	accResponseTime  uint64
+	totalConn        uint64
+	meanResponseTime uint64
 }
 
 func NewBackend(target *url.URL) *Backend {
@@ -34,6 +40,10 @@ func (b *Backend) IncrementConn() {
 
 func (b *Backend) DecrementConn() {
 	atomic.AddUint64(&b.activesConnections, ^uint64(0))
+}
+
+func (b *Backend) IncrementTotal() {
+	atomic.AddUint64(&b.totalConn, 1)
 }
 
 type ProxyHandler struct {
@@ -91,21 +101,75 @@ func (ph *ProxyHandler) LeastConnection() http.HandlerFunc {
 			}
 		}
 
+		var mu sync.Mutex
+
 		requestId := GenerateRequestID()
-
 		proxy := httputil.NewSingleHostReverseProxy(targetBackend.target)
-
 		originalDirector := proxy.Director
 
 		proxy.Director = func(r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+
 			originalDirector(r)
 			r.Header.Set("X-Request-ID", requestId)
 			targetBackend.IncrementConn()
 		}
 
 		proxy.ModifyResponse = func(r *http.Response) error {
+			mu.Lock()
+			defer mu.Unlock()
+
 			r.Header.Set("X-Request-ID", requestId)
 			targetBackend.DecrementConn()
+			return nil
+		}
+
+		proxy.ServeHTTP(w, r)
+	}
+}
+
+func (ph *ProxyHandler) LeastResponseTime() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		targetBackend := ph.backends[0]
+
+		for _, b := range ph.backends {
+			if b.meanResponseTime < targetBackend.meanResponseTime {
+				targetBackend = b
+			}
+		}
+
+		requestId := GenerateRequestID()
+
+		proxy := httputil.NewSingleHostReverseProxy(targetBackend.target)
+
+		originalDirector := proxy.Director
+
+		var (
+			mu       sync.Mutex
+			start    time.Time
+			duration time.Duration
+		)
+
+		proxy.Director = func(r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			originalDirector(r)
+			r.Header.Set("X-Request-ID", requestId)
+			targetBackend.IncrementConn()
+			targetBackend.IncrementTotal()
+			start = time.Now()
+		}
+
+		proxy.ModifyResponse = func(r *http.Response) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			r.Header.Set("X-Request-ID", requestId)
+			targetBackend.DecrementConn()
+			duration = time.Since(start)
+			calculateMeanTime(targetBackend, uint64(duration.Milliseconds()))
 			return nil
 		}
 
@@ -122,4 +186,10 @@ func (ph *ProxyHandler) WithRateLimiting(
 
 func GenerateRequestID() string {
 	return uuid.New().String() // Gera um UUID único para cada requisição
+}
+
+func calculateMeanTime(backend *Backend, duration uint64) {
+	backend.totalConn++
+	backend.accResponseTime += duration
+	backend.meanResponseTime = backend.accResponseTime / backend.totalConn
 }

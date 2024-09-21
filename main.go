@@ -10,21 +10,18 @@ import (
 func testing() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(time.Millisecond * 200)
 		w.Write([]byte("chegou em 3001"))
 	})
 	go http.ListenAndServe(":3001", mux)
 
 	mux2 := http.NewServeMux()
 	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(time.Millisecond * 300)
 		w.Write([]byte("chegou em 3002"))
 	})
 	go http.ListenAndServe(":3002", mux2)
 
 	mux3 := http.NewServeMux()
 	mux3.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(time.Millisecond * 100)
 		w.Write([]byte("chegou em 3003"))
 	})
 	go http.ListenAndServe(":3003", mux3)
@@ -39,7 +36,10 @@ func main() {
 
 	http.ListenAndServe(
 		":3000",
-		proxyHandler.LeastConnection(),
+		proxyHandler.WithRateLimiting(
+			LeakyBucket(time.Second*1, 10),
+			proxyHandler.RoundRobin(),
+		),
 	)
 }
 

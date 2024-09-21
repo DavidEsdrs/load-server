@@ -7,12 +7,11 @@ import (
 	"time"
 )
 
-func LeakyBucket(genRateMs uint64, maxToken int) func(http.HandlerFunc) http.HandlerFunc {
+func LeakyBucket(genRate time.Duration, maxToken int) func(http.HandlerFunc) http.HandlerFunc {
 	var tokens atomic.Int64
 	tokens.Store(0)
 
-	ticker := time.NewTicker(time.Duration(genRateMs))
-	defer ticker.Stop()
+	ticker := time.NewTicker(genRate)
 
 	go func() {
 		for {
@@ -23,7 +22,7 @@ func LeakyBucket(genRateMs uint64, maxToken int) func(http.HandlerFunc) http.Han
 		}
 	}()
 
-	result := strconv.Itoa(int(genRateMs / 1000))
+	result := strconv.Itoa(int(genRate / time.Second))
 
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
