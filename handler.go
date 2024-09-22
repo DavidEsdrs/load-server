@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,21 +23,13 @@ type Backend struct {
 	accResponseTime  uint64
 	totalConn        uint64
 	meanResponseTime uint64
-
-	logFile *os.File
 }
 
 func NewBackend(target *url.URL) *Backend {
-	f, err := os.OpenFile(target.Host+".log", os.O_CREATE|os.O_RDONLY, 0640)
-	if err != nil {
-		log.Fatalf("unable to create log file for backend path \"%v\"", target.Host)
-	}
-
 	return &Backend{
 		target:             target,
 		activesConnections: 0,
 		maxConn:            1e3,
-		logFile:            f,
 	}
 }
 
@@ -59,7 +50,7 @@ func (b *Backend) IncrementTotal() {
 }
 
 func (b *Backend) Cleanup() error {
-	return b.logFile.Close()
+	return nil
 }
 
 type ProxyHandler struct {
@@ -88,20 +79,30 @@ func NewProxyHandler(backends []BackendConfig) *ProxyHandler {
 		}
 		backend := NewBackend(url)
 
-		if tb, ok := b.RateLimit.(*TokenBucket); ok {
-			backend.RateLimiter = TokenBucketLimiting(
-				time.Duration(tb.GenerationTime),
-				tb.MaxToken,
-			)
-		} else if lb, ok := b.RateLimit.(*LeakyBucket); ok {
-			backend.RateLimiter = LeakyBucketLimiting(
-				time.Duration(lb.LeakyRateMs),
-				lb.MaxCapacity,
-			)
+		if limiter, ok := b.RateLimit.(map[string]interface{}); ok {
+			switch limiter["type"] {
+			case "token_bucket":
+				backend.RateLimiter = TokenBucketLimiting(
+					time.Duration(limiter["generation_time_ms"].(int))*time.Millisecond,
+					limiter["max_token"].(int),
+				)
+			case "leaky_bucket":
+				backend.RateLimiter = LeakyBucketLimiting(
+					time.Duration(limiter["leaky_rate_ms"].(int))*time.Millisecond,
+					limiter["max_capacity"].(int),
+				)
+			default:
+				backend.RateLimiter = func(hf http.HandlerFunc) http.HandlerFunc {
+					return hf
+				}
+			}
+
+			log.Println("backend", b.Path, "added -", limiter["type"], "rate limit set")
 		} else {
 			backend.RateLimiter = func(hf http.HandlerFunc) http.HandlerFunc {
 				return hf
 			}
+			log.Println("backend", b.Path, "added -", "no rate limit set")
 		}
 
 		backendURLs = append(backendURLs, backend)
@@ -133,6 +134,8 @@ func (ph *ProxyHandler) Random() http.HandlerFunc {
 }
 
 func (ph *ProxyHandler) LeastConnection() http.HandlerFunc {
+	var mu sync.Mutex
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		targetBackend := ph.backends[0]
 
@@ -141,8 +144,6 @@ func (ph *ProxyHandler) LeastConnection() http.HandlerFunc {
 				targetBackend = b
 			}
 		}
-
-		var mu sync.Mutex
 
 		requestId := GenerateRequestID()
 		proxy := httputil.NewSingleHostReverseProxy(targetBackend.target)
@@ -171,6 +172,8 @@ func (ph *ProxyHandler) LeastConnection() http.HandlerFunc {
 }
 
 func (ph *ProxyHandler) LeastResponseTime() http.HandlerFunc {
+	var mu sync.Mutex
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		targetBackend := ph.backends[0]
 
@@ -185,7 +188,6 @@ func (ph *ProxyHandler) LeastResponseTime() http.HandlerFunc {
 		originalDirector := proxy.Director
 
 		var (
-			mu       sync.Mutex
 			start    time.Time
 			duration time.Duration
 		)

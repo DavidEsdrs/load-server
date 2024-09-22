@@ -3,8 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-
-	"github.com/spf13/viper"
 )
 
 type TokenBucket struct {
@@ -39,20 +37,6 @@ type Config struct {
 	RoutingRules   []RoutingRules  `mapstructure:"routing_rules"`
 }
 
-func parseConfig(filename string) {
-	viper.SetConfigName(filename)
-	viper.SetConfigType("yml")
-	viper.AddConfigPath(".")
-
-	if err := viper.ReadInConfig(); err != nil {
-		log.Fatalf("error reading config file: %s", err)
-	}
-
-	if err := viper.Unmarshal(&config); err != nil {
-		log.Fatalf("error unmarshalling config: %s", err)
-	}
-}
-
 func getBalancingAlgorithm(proxyHandler *ProxyHandler) func() http.HandlerFunc {
 	var (
 		balancingAlgorithm func() http.HandlerFunc
@@ -68,7 +52,7 @@ func getBalancingAlgorithm(proxyHandler *ProxyHandler) func() http.HandlerFunc {
 	case "least_response_time":
 		balancingAlgorithm = proxyHandler.LeastResponseTime
 	default:
-		panic("unknown balancing algorithm")
+		log.Fatal("unknown balancing algorithm")
 	}
 
 	return balancingAlgorithm

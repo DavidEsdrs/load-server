@@ -1,32 +1,27 @@
 port: ":3000"
 
 balancing:
-  type: random
+  type: least_response_time
 
 backends:
   - name: main
     path: http://localhost:3001
-    rate_limit:
-      type: token_bucket
-      generation_time_ms: 1000
-      max_token: 1000
   - name: secondary
     path: http://localhost:3002
-    rate_limit:
-      type: leaky_bucket
-      leaky_rate_ms: 1000
-      max_capacity: 1000
   - name: tertiary
     path: http://localhost:3003
-    rate_limit:
-      type: token_bucket
-      generation_time_ms: 1000
-      max_token: 1000
-
-routing_rules:
-  - path: "/app"
-    backend: main
-  - path: "v2."
-    backend: secondary
-  - path: "api."
-    backend: tertiary
+  - name: api4
+    path: http://localhost:3004
+  - name: api5
+    path: http://localhost:3005
+  - name: api6
+    path: http://localhost:3006
+  - name: api7
+    path: http://localhost:3007
+  - name: api8
+    path: http://localhost:3008
+  - name: api9
+    path: http://localhost:3009
+  - name: api10
+    path: http://localhost:3010
+      

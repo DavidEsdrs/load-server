@@ -1,36 +1,56 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var config Config
 
-func testing() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("chegou em 3001"))
-	})
-	go http.ListenAndServe(":3001", mux)
+var RootCmd = &cobra.Command{
+	Use:   "",
+	Short: "A simple reverse proxy",
+	Run:   func(cmd *cobra.Command, args []string) {},
+}
 
-	mux2 := http.NewServeMux()
-	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("chegou em 3002"))
-	})
-	go http.ListenAndServe(":3002", mux2)
+func init() {
+	RootCmd.PersistentFlags().String("config", "", "config file (default is ./balance.yml)")
+	viper.BindPFlag("config", RootCmd.PersistentFlags().Lookup("config"))
+	viper.AutomaticEnv()
+	cobra.OnInitialize(initConfig)
+}
 
-	mux3 := http.NewServeMux()
-	mux3.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("chegou em 3003"))
-	})
-	go http.ListenAndServe(":3003", mux3)
+func initConfig() {
+	configFile := viper.GetString("config")
+
+	if configFile != "" {
+		viper.SetConfigFile(configFile)
+	} else {
+		viper.AddConfigPath("./")
+		viper.SetConfigName("balance")
+		viper.SetConfigType("yml")
+	}
+
+	if err := viper.ReadInConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config file: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := viper.Unmarshal(&config); err != nil {
+		fmt.Fprintf(os.Stderr, "Error unmarshalling config: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func main() {
-	testing()
-
-	parseConfig("balance")
+	if err := RootCmd.Execute(); err != nil {
+		panic(err)
+	}
 
 	proxyHandler := NewProxyHandler(config.BackendConfigs)
 	defer proxyHandler.Cleanup()
